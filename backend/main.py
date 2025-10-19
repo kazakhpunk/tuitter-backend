@@ -34,11 +34,39 @@ app.add_middleware(
 
 # ========== UTILITY FUNCTIONS ==========
 
-def get_current_user_from_handle(db: Session, handle: str) -> models.User:
-    """Get current user by handle (username)"""
+def get_current_user_from_handle(db: Session, handle: str, auto_create: bool = True) -> models.User:
+    """
+    Get current user by handle (username).
+    Auto-creates user if they don't exist (when auto_create=True).
+    """
     user = crud.get_user_by_username(db, handle)
-    if not user:
+    
+    if not user and auto_create:
+        # Auto-create new user
+        user = models.User(
+            username=handle,
+            display_name=handle.capitalize(),
+            bio=f"Hi, I'm {handle}!",
+            followers=0,
+            following=0,
+            posts_count=0
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        
+        # Create default settings
+        settings = models.UserSettings(
+            user_id=user.id,
+            email_notifications=True,
+            show_online_status=True,
+            private_account=False
+        )
+        db.add(settings)
+        db.commit()
+    elif not user:
         raise HTTPException(status_code=404, detail=f"User '{handle}' not found")
+    
     return user
 
 
@@ -51,9 +79,9 @@ def get_current_user(
 ):
     """
     Get current user profile.
-    For demo purposes, uses query parameter to identify user.
+    Auto-creates user if they don't exist (for demo purposes).
     """
-    user = get_current_user_from_handle(db, handle)
+    user = get_current_user_from_handle(db, handle, auto_create=True)
     return schemas.UserResponse.from_orm(user)
 
 
@@ -356,6 +384,83 @@ def root():
         "version": "1.0.0",
         "docs": "/docs"
     }
+
+
+@app.post("/admin/seed-database")
+def seed_database(db: Session = Depends(get_db)):
+    """
+    Seed the database with demo data.
+    Call this once after deployment to populate initial data.
+    """
+    try:
+        # Check if data already exists
+        existing_users = db.query(models.User).count()
+        if existing_users > 0:
+            return {"message": "Database already seeded", "users": existing_users}
+        
+        # Create demo users
+        users_data = [
+            {"username": "yourname", "display_name": "Your Name", "bio": "Building cool stuff with TUIs | vim enthusiast | developer", "followers": 891, "following": 328, "posts_count": 142},
+            {"username": "alice", "display_name": "Alice Johnson", "bio": "Full-stack developer | Open source contributor", "followers": 1234, "following": 567, "posts_count": 89},
+            {"username": "bob", "display_name": "Bob Smith", "bio": "Tech blogger | Code reviewer | Coffee enthusiast", "followers": 2345, "following": 890, "posts_count": 234},
+            {"username": "charlie", "display_name": "Charlie Davis", "bio": "CLI tools developer | Rust advocate", "followers": 456, "following": 234, "posts_count": 67},
+            {"username": "techwriter", "display_name": "Tech Writer", "bio": "Writing about technology and development", "followers": 3456, "following": 1234, "posts_count": 456},
+            {"username": "cliexpert", "display_name": "CLI Expert", "bio": "Terminal user interface expert", "followers": 2890, "following": 1100, "posts_count": 389},
+            {"username": "vimfan", "display_name": "Vim Fan", "bio": "Vim configuration enthusiast", "followers": 1567, "following": 678, "posts_count": 234},
+            {"username": "opensource_dev", "display_name": "OpenSource Dev", "bio": "Building tools for developers", "followers": 1200, "following": 450, "posts_count": 156},
+        ]
+        
+        created_users = {}
+        for user_data in users_data:
+            user = models.User(**user_data)
+            db.add(user)
+            db.flush()
+            created_users[user.username] = user.id
+            
+            # Create settings for each user
+            settings = models.UserSettings(
+                user_id=user.id,
+                email_notifications=True,
+                show_online_status=True,
+                private_account=False,
+                github_connected=(user.username == "yourname")
+            )
+            db.add(settings)
+        
+        db.commit()
+        
+        # Create demo posts
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        
+        posts_data = [
+            {"author_id": created_users["yourname"], "author_handle": "yourname", "content": "Just shipped a new feature! The TUI is looking amazing 🚀", "likes_count": 12, "reposts_count": 3, "comments_count": 2, "created_at": now - timedelta(minutes=5)},
+            {"author_id": created_users["alice"], "author_handle": "alice", "content": "Working on a new CLI tool for developers. Any testers?", "likes_count": 45, "reposts_count": 12, "comments_count": 1, "created_at": now - timedelta(minutes=15)},
+            {"author_id": created_users["bob"], "author_handle": "bob", "content": "Refactoring is like cleaning your room. You know where everything is in the mess, but it's still better to organize it.", "likes_count": 234, "reposts_count": 67, "comments_count": 0, "created_at": now - timedelta(hours=1)},
+            {"author_id": created_users["techwriter"], "author_handle": "techwriter", "content": "Just discovered this amazing TUI framework! #vim #tui #opensource", "likes_count": 234, "reposts_count": 45, "comments_count": 18, "created_at": now - timedelta(hours=2)},
+            {"author_id": created_users["cliexpert"], "author_handle": "cliexpert", "content": "Hot take: TUIs are making a comeback! 💻", "likes_count": 189, "reposts_count": 52, "comments_count": 34, "created_at": now - timedelta(hours=4)},
+            {"author_id": created_users["vimfan"], "author_handle": "vimfan", "content": "Finally got my vim config working with this social network.", "likes_count": 156, "reposts_count": 28, "comments_count": 12, "created_at": now - timedelta(hours=5)},
+        ]
+        
+        created_posts = []
+        for post_data in posts_data:
+            post = models.Post(**post_data)
+            db.add(post)
+            db.flush()
+            created_posts.append(post.id)
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": "Database seeded successfully!",
+            "users_created": len(created_users),
+            "posts_created": len(created_posts)
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error seeding database: {str(e)}")
 
 
 # ========== RUN SERVER ==========
